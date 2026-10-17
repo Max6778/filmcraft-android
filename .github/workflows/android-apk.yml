@@ -43,6 +43,11 @@ jobs:
           toolchain: 1.95.0
           targets: aarch64-linux-android,x86_64-linux-android
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 

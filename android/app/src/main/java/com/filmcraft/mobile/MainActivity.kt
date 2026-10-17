@@ -287,16 +287,70 @@ class MainActivity : Activity() {
     }
 
     private fun showEditPanel() {
-        val items = arrayOf("Undo", "Redo", "Remove selected clip", "Add keyframe")
+        val items = arrayOf("Undo", "Redo", "Remove selected clip", "Add transform keyframe", "Create scale bounce")
         android.app.AlertDialog.Builder(this).setTitle("Edit clip").setItems(items) { _, which ->
             when (which) {
                 0 -> runEngineAction("edit.undo", "Undone")
                 1 -> runEngineAction("edit.redo", "Redone")
                 2 -> selectedClipUri?.let { confirmRemove(it, videoClips.any { clip -> clip.first == it }) }
                     ?: Toast.makeText(this, "Select a clip in the timeline first", Toast.LENGTH_SHORT).show()
-                3 -> Toast.makeText(this, "Select a keyframeable clip and position the playhead first", Toast.LENGTH_SHORT).show()
+                3 -> addTransformKeyframes()
+                4 -> createScaleBounce()
             }
         }.show()
+    }
+
+    private fun playheadTicks(): Long = ((previewPlayer?.currentPosition ?: 0L).coerceAtLeast(0L) * 254_016_000L)
+
+    private fun addTransformKeyframes() {
+        val clip = activeTimelineClipId
+        if (!nativeSessionReady || clip == null || !selectedClipHasVideo) {
+            Toast.makeText(this, "Select a video or photo clip first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val time = playheadTicks()
+        selectionLabel.text = "Adding transform keyframes…"
+        importExecutor.execute {
+            val result = runCatching {
+                listOf("position", "scale", "rotation").forEach { parameter ->
+                    val response = JSONObject(nativeExecute("effects.addKeyframe", JSONObject()
+                        .put("clip", clip).put("effect", "motion").put("param", parameter).put("time", time).toString()))
+                    if (!response.optBoolean("ok")) throw IllegalStateException(response.optString("error", "Could not keyframe $parameter"))
+                }
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                selectionLabel.text = result.fold({ "Transform keys added at ${clockText(previewPlayer?.currentPosition ?: 0L)}" },
+                    { error -> "Keyframe failed · ${error.localizedMessage ?: "FilmCraft error"}" })
+            }
+        }
+    }
+
+    private fun createScaleBounce() {
+        val clip = activeTimelineClipId
+        if (!nativeSessionReady || clip == null || !selectedClipHasVideo) {
+            Toast.makeText(this, "Select a video or photo clip first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val start = playheadTicks()
+        val beats = listOf(0L to 100.0, 220L to 124.0, 420L to 92.0, 680L to 110.0, 920L to 100.0)
+        selectionLabel.text = "Creating scale bounce…"
+        importExecutor.execute {
+            val result = runCatching {
+                beats.forEachIndexed { index, (offsetMs, scale) ->
+                    val response = JSONObject(nativeExecute("effects.setParam", JSONObject()
+                        .put("clip", clip).put("effect", "motion").put("param", "scale")
+                        .put("value", scale).put("time", start + offsetMs * 254_016_000L)
+                        .put("keyframe", true).put("begin", index == 0).toString()))
+                    if (!response.optBoolean("ok")) throw IllegalStateException(response.optString("error", "Could not create bounce keyframe"))
+                }
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                selectionLabel.text = result.fold({ "Scale bounce added · preview the clip to see the animation" },
+                    { error -> "Bounce failed · ${error.localizedMessage ?: "FilmCraft error"}" })
+            }
+        }
     }
 
     private fun showCanvasPanel() {

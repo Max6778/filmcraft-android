@@ -1886,6 +1886,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "filmcraft-android-native"
+version = "0.8.0"
+dependencies = [
+ "filmcraft-engine",
+ "jni 0.21.1",
+ "serde_json",
+]
+
+[[package]]
 name = "filmcraft-edit"
 version = "0.8.0"
 dependencies = [
