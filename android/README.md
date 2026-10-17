@@ -2,7 +2,10 @@
 
 This is the native Android application module. The `app/src/main` editor screen is an Android
 Activity with a touch-sized preview, separate video/overlay/audio lanes, editing tools, and Android's
-Storage Access Framework picker for selecting local media without broad storage permissions.
+Storage Access Framework picker for selecting local media without broad storage permissions. Image
+overlays import onto a separate video track and support drag, pinch-scale, and rotate gestures in the
+preview; those transforms save back to the native motion effect and can be animated with keyframes.
+The Edit panel can add position/scale/rotation keyframes or write a scale-bounce animation.
 
 Selected documents are copied into app-private storage and imported into a FilmCraft Rust `Session`
 through the JNI bridge. The bridge exposes FilmCraft’s registered command catalog and accepts validated JSON command calls, so Android features can use the same Rust session operations instead of reimplementing project edits in Kotlin. The first imported clip creates a sequence; later imports are placed at the
@@ -14,7 +17,7 @@ are stored for rendering but do not yet display live in this Android preview. Th
 
 ## Build
 
-Install Android Studio with Android SDK 35 and the NDK, Rust 1.95+, the Android Rust targets, and
+Install Android Studio with Android SDK 36 and the NDK, Rust 1.95+, the Android Rust targets, and
 `cargo-ndk`. Open this `android/` directory in Android Studio or run Gradle from this directory:
 
 ```sh
