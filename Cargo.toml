@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "apps/*", "xtask"]
+exclude = ["android/effectcraft-native"]
 default-members = ["crates/*", "apps/*", "xtask"]
 
 [workspace.package]
