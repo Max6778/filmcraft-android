@@ -30,6 +30,9 @@ dependencies {
 }
 
 val rustJniLibs = layout.projectDirectory.dir("src/main/jniLibs")
+val effectCraftJniLibs = layout.buildDirectory.dir("generated/effectcraftJniLibs")
+android.sourceSets.getByName("main").jniLibs.srcDir(effectCraftJniLibs)
+
 val buildFilmCraftRust by tasks.registering(Exec::class) {
     workingDir(rootProject.projectDir.parentFile)
     commandLine(
@@ -43,6 +46,20 @@ val buildFilmCraftRust by tasks.registering(Exec::class) {
     outputs.dir(rustJniLibs)
 }
 
+val buildEffectCraftRust by tasks.registering(Exec::class) {
+    workingDir(rootProject.projectDir.resolve("effectcraft-native"))
+    commandLine(
+        "cargo", "ndk",
+        "--platform", "26",
+        "-t", "arm64-v8a",
+        "-t", "x86_64",
+        "-o", effectCraftJniLibs.get().asFile.absolutePath,
+        "build", "--release",
+    )
+    outputs.dir(effectCraftJniLibs)
+    mustRunAfter(buildFilmCraftRust)
+}
+
 tasks.named("preBuild").configure {
-    dependsOn(buildFilmCraftRust)
+    dependsOn(buildFilmCraftRust, buildEffectCraftRust)
 }

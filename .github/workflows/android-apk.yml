@@ -46,7 +46,9 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: . -> target
+          workspaces: |
+            . -> target
+            android/effectcraft-native -> target
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
@@ -54,6 +56,15 @@ jobs:
       - name: Build APK
         working-directory: android
         run: gradle --no-daemon :app:assembleDebug
+
+      - name: Upload generated EffectCraft lockfile for review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: effectcraft-android-cargo-lock
+          path: android/effectcraft-native/Cargo.lock
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4

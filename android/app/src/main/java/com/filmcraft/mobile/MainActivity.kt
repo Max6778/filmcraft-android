@@ -81,6 +81,8 @@ class MainActivity : ComponentActivity() {
     private var gestureStartScale = 1f
     private val timelineClipIds = mutableMapOf<Uri, Long>()
     private val effectCatalog = mutableListOf<JSONObject>()
+    private val effectCraftCatalog = mutableListOf<JSONObject>()
+    private val effectCraftCommandCatalog = mutableListOf<JSONObject>()
     private val engineCommandCatalog = mutableListOf<JSONObject>()
     private var activeVideo: Uri? = null
     private var selectedClipUri: Uri? = null
@@ -88,6 +90,8 @@ class MainActivity : ComponentActivity() {
     private var selectedClipHasVideo = false
     private val livePreviewEffectIds = mutableListOf<String>()
     private var nativeSessionReady = false
+    private var effectCraftSessionReady = false
+    private var selectedEffectCraftLayerId: Long? = null
     private var dialogReference: android.app.AlertDialog? = null
     private val importExecutor = Executors.newSingleThreadExecutor()
 
@@ -111,6 +115,7 @@ class MainActivity : ComponentActivity() {
         }
         overlayClips.lastOrNull()?.first?.let(::showOverlayPreview)
         initializeRustSession()
+        initializeEffectCraftSession()
     }
 
     private fun buildEditor(): View {
@@ -301,6 +306,7 @@ class MainActivity : ComponentActivity() {
     private fun openToolPanel(tool: String) {
         when (tool) {
             "Effects" -> openEffectsBrowser()
+            "Motion" -> showEffectCraftPanel()
             "Audio" -> openMediaPicker()
             "Edit" -> showEditPanel()
             "Overlay" -> openOverlayPicker()
@@ -518,7 +524,7 @@ class MainActivity : ComponentActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        listOf("Edit", "Audio", "Overlay", "Text", "Effects", "Filters", "Canvas").forEach { title ->
+        listOf("Edit", "Audio", "Overlay", "Text", "Effects", "Motion", "Filters", "Canvas").forEach { title ->
             val item = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
@@ -539,6 +545,7 @@ class MainActivity : ComponentActivity() {
         "Overlay" -> "▧"
         "Text" -> "T"
         "Effects" -> "✧"
+        "Motion" -> "◆"
         "Filters" -> "◐"
         else -> "▣"
     }
@@ -744,6 +751,288 @@ class MainActivity : ComponentActivity() {
                     if (list != null) for (index in 0 until list.length()) {
                         list.optJSONObject(index)?.let(effectCatalog::add)
                     }
+                }
+            }
+        }
+    }
+
+    private fun initializeEffectCraftSession() {
+        val response = runCatching {
+            System.loadLibrary("effectcraft_android")
+            JSONObject(nativeEffectCraftInitialize(filesDir.absolutePath))
+        }.getOrElse { error ->
+            Log.i("FilmCraftAndroid", "EffectCraft engine unavailable", error)
+            return
+        }
+        effectCraftSessionReady = response.optBoolean("ok")
+        if (!effectCraftSessionReady) {
+            Log.w("FilmCraftAndroid", response.optString("error", "Could not open EffectCraft project"))
+            return
+        }
+        runCatching { JSONObject(nativeEffectCraftListCommands()) }.onSuccess { catalog ->
+            effectCraftCommandCatalog.clear()
+            catalog.optJSONArray("result")?.let { commands ->
+                for (index in 0 until commands.length()) commands.optJSONObject(index)?.let(effectCraftCommandCatalog::add)
+            }
+            Log.i("FilmCraftAndroid", "EffectCraft ready · ${effectCraftCommandCatalog.size} native operations")
+        }
+        runCatching { JSONObject(nativeEffectCraftListEffects()) }.onSuccess { catalog ->
+            effectCraftCatalog.clear()
+            catalog.optJSONArray("result")?.let { effects ->
+                for (index in 0 until effects.length()) effects.optJSONObject(index)?.let(effectCraftCatalog::add)
+            }
+        }
+    }
+
+    private fun showEffectCraftPanel() {
+        if (!effectCraftSessionReady) {
+            Toast.makeText(this, "EffectCraft's native engine is not ready in this build", Toast.LENGTH_LONG).show()
+            return
+        }
+        val items = arrayOf("Add solid layer", "Add shape layer", "Add text layer", "EffectCraft effects library", "Add scale-bounce keyframes", "Preview composition", "Save EffectCraft project", "All native commands")
+        android.app.AlertDialog.Builder(this).setTitle("EffectCraft · Motion Graphics").setItems(items) { _, which ->
+            when (which) {
+                0 -> addEffectCraftLayer("layer.newSolid", JSONObject().put("name", "Mobile Solid").put("color", "#9ce849"))
+                1 -> addEffectCraftLayer("layer.newShape", JSONObject().put("name", "Mobile Shape").put("kind", "rounded").put("size", JSONArray().put(420).put(420)).put("fill", "#9ce849"))
+                2 -> addEffectCraftLayer("layer.newText", JSONObject().put("text", "EffectCraft"))
+                3 -> showEffectCraftEffectsBrowser()
+                4 -> createEffectCraftBounce()
+                5 -> renderEffectCraftComposition()
+                6 -> executeEffectCraftCommand("file.save", JSONObject()) { response ->
+                    selectionLabel.text = if (response.optBoolean("ok")) "EffectCraft project saved" else response.optString("error", "EffectCraft could not save")
+                }
+                7 -> showEffectCraftCommandBrowser()
+            }
+        }.show()
+    }
+
+    private fun showEffectCraftCommandBrowser() {
+        if (effectCraftCommandCatalog.isEmpty()) {
+            Toast.makeText(this, "EffectCraft command list is unavailable", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setBackgroundColor(this@MainActivity.background)
+        }
+        val search = EditText(this).apply {
+            hint = "Search commands or parameters"
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(muted)
+            setPadding(dp(12), 0, dp(12), 0)
+            background = rounded(surface, 10)
+        }
+        content.addView(search, LinearLayout.LayoutParams(-1, dp(46)))
+        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        content.addView(ScrollView(this).apply { addView(rows) }, LinearLayout.LayoutParams(-1, dp(390)))
+        fun render() {
+            rows.removeAllViews()
+            val query = search.text.toString().trim().lowercase()
+            val visible = effectCraftCommandCatalog.filter { command ->
+                "${command.optString("id")} ${command.optString("label")} ${command.optString("params")}".lowercase().contains(query)
+            }
+            visible.forEach { command ->
+                val id = command.optString("id")
+                rows.addView(label("${command.optString("label", id)}  ·  $id", 12f, Color.WHITE, true).apply {
+                    setPadding(dp(10), 0, dp(10), 0)
+                    background = rounded(surface, 8)
+                    setOnClickListener { promptEffectCraftCommand(command) }
+                }, LinearLayout.LayoutParams(-1, dp(52)).apply { bottomMargin = dp(5) })
+            }
+            if (visible.isEmpty()) rows.addView(label("No matching commands", 12f, muted))
+        }
+        search.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = render()
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        render()
+        android.app.AlertDialog.Builder(this).setTitle("EffectCraft · ${effectCraftCommandCatalog.size} commands")
+            .setView(content).setNegativeButton("Done", null).show()
+    }
+
+    private fun promptEffectCraftCommand(command: JSONObject) {
+        val commandId = command.optString("id")
+        val params = EditText(this).apply {
+            hint = "JSON parameters"
+            setText("{}")
+            setTextColor(Color.WHITE)
+            setHintTextColor(muted)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            minLines = 3
+            maxLines = 6
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = rounded(surface, 10)
+        }
+        val details = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(10), dp(18), 0)
+            addView(label(command.optString("params", "No parameter guide"), 12f, muted))
+            addView(params, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
+        }
+        val dialog = android.app.AlertDialog.Builder(this).setTitle("${command.optString("label", commandId)} · $commandId")
+            .setView(details).setNegativeButton("Cancel", null).setPositiveButton("Run", null).create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val parsed = runCatching { JSONObject(params.text.toString()) }.getOrNull()
+                if (parsed == null) {
+                    params.error = "Enter a valid JSON object"
+                    return@setOnClickListener
+                }
+                dialog.dismiss()
+                executeEffectCraftCommand(commandId, parsed) { response ->
+                    selectionLabel.text = if (response.optBoolean("ok")) "EffectCraft · $commandId completed"
+                        else response.optString("error", "$commandId failed")
+                }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun addEffectCraftLayer(command: String, params: JSONObject) {
+        executeEffectCraftCommand(command, params) { response ->
+            if (!response.optBoolean("ok")) {
+                selectionLabel.text = response.optString("error", "Could not add EffectCraft layer")
+                return@executeEffectCraftCommand
+            }
+            selectedEffectCraftLayerId = response.optJSONObject("result")?.optLong("layer", -1L)?.takeIf { it > 0L }
+            selectionLabel.text = "EffectCraft layer added · add effects or transform keys in Motion"
+        }
+    }
+
+    private fun showEffectCraftEffectsBrowser() {
+        val layerId = selectedEffectCraftLayerId
+        if (!effectCraftSessionReady || layerId == null || effectCraftCatalog.isEmpty()) {
+            Toast.makeText(this, "Add an EffectCraft layer first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setBackgroundColor(this@MainActivity.background)
+        }
+        val search = EditText(this).apply {
+            hint = "Search EffectCraft effects"
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(muted)
+            setPadding(dp(12), 0, dp(12), 0)
+            background = rounded(surface, 10)
+        }
+        content.addView(search, LinearLayout.LayoutParams(-1, dp(46)))
+        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        content.addView(ScrollView(this).apply { addView(rows) }, LinearLayout.LayoutParams(-1, dp(390)))
+        fun render() {
+            rows.removeAllViews()
+            val query = search.text.toString().trim().lowercase()
+            val visible = effectCraftCatalog.filter { effect ->
+                "${effect.optString("name")} ${effect.optString("category")} ${effect.optString("id")}".lowercase().contains(query)
+            }
+            visible.forEach { effect ->
+                rows.addView(label("${effect.optString("name")}  ·  ${effect.optString("category")}", 12f, Color.WHITE, true).apply {
+                    setPadding(dp(10), 0, dp(10), 0)
+                    background = rounded(surface, 8)
+                    setOnClickListener {
+                        val command = JSONObject().put("effect", effect.optString("id")).put("layers", JSONArray().put(layerId))
+                        executeEffectCraftCommand("effect.apply", command) { response ->
+                            selectionLabel.text = if (response.optBoolean("ok")) "Applied ${effect.optString("name")} in EffectCraft"
+                                else response.optString("error", "Could not apply EffectCraft effect")
+                        }
+                    }
+                }, LinearLayout.LayoutParams(-1, dp(52)).apply { bottomMargin = dp(5) })
+            }
+            if (visible.isEmpty()) rows.addView(label("No matching EffectCraft effects", 12f, muted))
+        }
+        search.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = render()
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        render()
+        android.app.AlertDialog.Builder(this).setTitle("EffectCraft · ${effectCraftCatalog.size} effects")
+            .setView(content).setNegativeButton("Done", null).show()
+    }
+
+    private fun renderEffectCraftComposition() {
+        if (!effectCraftSessionReady) return
+        selectionLabel.text = "Rendering EffectCraft preview · CPU compositor"
+        importExecutor.execute {
+            val result = runCatching {
+                val bytes = nativeEffectCraftRender()
+                if (bytes.size < 8) throw IllegalStateException("EffectCraft returned an empty preview")
+                val header = java.nio.ByteBuffer.wrap(bytes, 0, 8).order(java.nio.ByteOrder.BIG_ENDIAN)
+                val width = header.int
+                val height = header.int
+                val count = width.toLong() * height.toLong()
+                if (width <= 0 || height <= 0 || width > 720 || height > 720 || count * 4L != bytes.size - 8L) {
+                    throw IllegalStateException("EffectCraft returned invalid preview dimensions")
+                }
+                val pixels = IntArray(count.toInt())
+                var offset = 8
+                for (index in pixels.indices) {
+                    val red = bytes[offset++].toInt() and 0xff
+                    val green = bytes[offset++].toInt() and 0xff
+                    val blue = bytes[offset++].toInt() and 0xff
+                    val alpha = bytes[offset++].toInt() and 0xff
+                    pixels[index] = (alpha shl 24) or (red shl 16) or (green shl 8) or blue
+                }
+                Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.onSuccess { bitmap ->
+                    previewPlayer?.pause()
+                    videoPreview.visibility = View.GONE
+                    overlayPreview.visibility = View.GONE
+                    emptyPreview.visibility = View.GONE
+                    imagePreview.colorFilter = null
+                    imagePreview.setImageBitmap(bitmap)
+                    imagePreview.visibility = View.VISIBLE
+                    selectionLabel.text = "EffectCraft composition preview · 720p CPU render"
+                }.onFailure { error ->
+                    selectionLabel.text = "EffectCraft preview failed · ${error.localizedMessage ?: "render error"}"
+                }
+            }
+        }
+    }
+
+    private fun createEffectCraftBounce() {
+        val layerId = selectedEffectCraftLayerId
+        if (!effectCraftSessionReady || layerId == null) {
+            Toast.makeText(this, "Create or select an EffectCraft layer first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val keys = listOf(0.0 to 100.0, 0.22 to 124.0, 0.42 to 92.0, 0.68 to 110.0, 0.92 to 100.0)
+        importExecutor.execute {
+            val result = runCatching {
+                keys.forEach { (time, scale) ->
+                    val params = JSONObject().put("layer", layerId).put("path", "transform/scale").put("time", time)
+                        .put("value", JSONArray().put(scale).put(scale).put(100.0))
+                    val response = JSONObject(nativeEffectCraftExecute("prop.addKey", params.toString()))
+                    if (!response.optBoolean("ok")) throw IllegalStateException(response.optString("error", "Could not animate EffectCraft scale"))
+                }
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                selectionLabel.text = result.fold({ "EffectCraft scale bounce keyframes saved" },
+                    { error -> "EffectCraft animation failed · ${error.localizedMessage ?: "engine error"}" })
+            }
+        }
+    }
+
+    private fun executeEffectCraftCommand(commandId: String, parameters: JSONObject = JSONObject(), onComplete: (JSONObject) -> Unit = {}) {
+        if (!effectCraftSessionReady) {
+            selectionLabel.text = "EffectCraft engine is not ready"
+            return
+        }
+        importExecutor.execute {
+            val result = runCatching { JSONObject(nativeEffectCraftExecute(commandId, parameters.toString())) }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.onSuccess(onComplete).onFailure { error ->
+                    selectionLabel.text = "EffectCraft $commandId failed · ${error.localizedMessage ?: "engine error"}"
                 }
             }
         }
@@ -1261,6 +1550,11 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
+    private external fun nativeEffectCraftInitialize(dataDir: String): String
+    private external fun nativeEffectCraftListCommands(): String
+    private external fun nativeEffectCraftListEffects(): String
+    private external fun nativeEffectCraftRender(): ByteArray
+    private external fun nativeEffectCraftExecute(commandId: String, parametersJson: String): String
     private external fun nativeInitialize(dataDir: String): String
     private external fun nativeImportMedia(path: String, overlay: Boolean): String
     private external fun nativeListVideoEffects(): String

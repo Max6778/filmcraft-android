@@ -13,7 +13,7 @@ end of its active timeline. The session saves a mobile `.fcproj` draft and reope
 Photos decode asynchronously at a capped preview size; AndroidX Media3 ExoPlayer renders video to
 its hardware-backed surface with a 720p track preference (using the source track when no smaller alternative exists) and an 8 MiB buffer target for low-memory phones. The effects browser reads FilmCraft's video effect catalog and applies selected effects to
 the saved sequence clip. Black & White and Invert also have a live preview; other FilmCraft effects
-are stored for rendering but do not yet display live in this Android preview. The EffectCraft repository is not present in this checkout, so its separate effect model cannot yet be adapted or packaged. The Android UI also does not expose every FilmCraft engine command yet; the command bridge is the integration point for building out those native controls.
+are stored for rendering but do not yet display live in this Android preview. The EffectCraft composition engine is built from its pinned upstream Rust revision in a separate Android workspace, with its own app-private `.ecproj` project. Its Motion panel exposes a searchable effect catalog, core layer and animation controls, and a searchable native command browser. This is an initial port: the engine command surface is available, while dedicated touch panels and a shared FilmCraft/EffectCraft timeline are still being developed.
 
 ## Build
 
@@ -26,8 +26,10 @@ cargo install cargo-ndk
 ./gradlew :app:assembleDebug
 ```
 
-The Gradle `preBuild` task cross-compiles `filmcraft-android-native` for ARM64 and x86_64 and places
-the resulting JNI libraries under `app/src/main/jniLibs` before packaging the APK.
+The Gradle `preBuild` task cross-compiles both native bridges for ARM64 and x86_64. FilmCraft's
+library goes under `app/src/main/jniLibs`; EffectCraft's goes under `app/build/generated` and is
+included as a generated JNI library source before APK packaging. The engines have separate Cargo
+workspaces so the EffectCraft dependency lock does not alter FilmCraft's desktop packaging lock. EffectCraft's Motion panel exposes its native effect registry and a searchable command browser; commands accept the engine's JSON parameters, so the Android UI can reach operations that do not yet have dedicated touch controls.
 
 GitHub Actions builds this debug APK on pushes, pull requests, and manual runs. Download the
 `filmcraft-android-debug` artifact from the completed workflow run. The workflow is defined in

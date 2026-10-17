@@ -1,0 +1,28 @@
+[package]
+name = "effectcraft-android-native"
+description = "JNI bridge from the native Android app to the EffectCraft composition engine"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+
+[lib]
+name = "effectcraft_android"
+crate-type = ["cdylib"]
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unimplemented = "deny"
+todo = "deny"
+unreachable = "deny"
+
+[dependencies]
+effectcraft-engine = { git = "https://github.com/Max6778/effectcraft-android.git", rev = "8f02f52a44a4b1ea807d8824b92301b96f896a06", version = "0.10.0" }
+jni = "0.21.1"
+serde_json = "1"
+rayon = "1"
