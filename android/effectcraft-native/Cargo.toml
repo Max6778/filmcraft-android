@@ -26,3 +26,6 @@ effectcraft-engine = { git = "https://github.com/Max6778/effectcraft-android.git
 jni = "0.21.1"
 serde_json = "1"
 rayon = "1"
+
+[patch.crates-io]
+hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d", version = "=0.7.2" }
