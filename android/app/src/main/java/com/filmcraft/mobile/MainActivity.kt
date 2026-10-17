@@ -460,29 +460,58 @@ class MainActivity : Activity() {
             .setTitle("Remove clip?")
             .setMessage("Remove ${clip.second} from this draft?")
             .setNegativeButton("Cancel", null)
-            .setPositiveButton("Remove") { _, _ ->
-                list.removeAll { it.first == uri }
-                timelineClipIds.remove(uri)
-                if (video && activeVideo == uri) {
-                    previewPlayer?.stop()
-                    activeVideo = null
-                    activeTimelineClipId = null
-                    selectedClipHasVideo = false
-                    videoClips.firstOrNull()?.first?.let(::showVideo) ?: run {
-                        videoPreview.visibility = View.GONE
-                        emptyPreview.visibility = View.VISIBLE
-                    }
-                }
-                if (selectedClipUri == uri) {
-                    selectedClipUri = videoClips.firstOrNull()?.first ?: audioClips.firstOrNull()?.first
-                    activeTimelineClipId = selectedClipUri?.let(timelineClipIds::get)
-                    selectedClipHasVideo = selectedClipUri?.let { selected -> videoClips.any { it.first == selected } } == true
-                }
-                persistClips()
-                renderClips()
-                selectionLabel.text = "Clip removed from draft"
-            }
+            .setPositiveButton("Remove") { _, _ -> removeMediaFromDraft(uri, video) }
             .show()
+    }
+
+    private fun removeMediaFromDraft(uri: Uri, video: Boolean) {
+        val clipId = timelineClipIds[uri]
+        if (clipId == null || !nativeSessionReady) {
+            forgetMediaLocally(uri, video)
+            selectionLabel.text = "Removed from this device draft"
+            return
+        }
+        selectionLabel.text = "Removing clip from FilmCraft timeline…"
+        importExecutor.execute {
+            val result = runCatching {
+                val selected = JSONObject(nativeExecute("timeline.select", JSONObject().put("clips", JSONArray().put(clipId)).toString()))
+                if (!selected.optBoolean("ok")) throw IllegalStateException(selected.optString("error", "Could not select timeline clip"))
+                val removed = JSONObject(nativeExecute("edit.clear", JSONObject().toString()))
+                if (!removed.optBoolean("ok")) throw IllegalStateException(removed.optString("error", "FilmCraft could not remove the clip"))
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.onSuccess {
+                    forgetMediaLocally(uri, video)
+                    selectionLabel.text = "Clip removed from draft"
+                }.onFailure { error ->
+                    selectionLabel.text = "Could not remove clip · ${error.localizedMessage ?: "FilmCraft error"}"
+                }
+            }
+        }
+    }
+
+    private fun forgetMediaLocally(uri: Uri, video: Boolean) {
+        val list = if (video) videoClips else audioClips
+        list.removeAll { it.first == uri }
+        timelineClipIds.remove(uri)
+        if (video && activeVideo == uri) {
+            previewPlayer?.stop()
+            activeVideo = null
+            activeTimelineClipId = null
+            selectedClipHasVideo = false
+            videoClips.firstOrNull()?.first?.let(::showVideo) ?: run {
+                videoPreview.visibility = View.GONE
+                emptyPreview.visibility = View.VISIBLE
+            }
+        }
+        if (selectedClipUri == uri) {
+            selectedClipUri = videoClips.firstOrNull()?.first ?: audioClips.firstOrNull()?.first
+            activeTimelineClipId = selectedClipUri?.let(timelineClipIds::get)
+            selectedClipHasVideo = selectedClipUri?.let { selected -> videoClips.any { it.first == selected } } == true
+        }
+        persistClips()
+        renderClips()
     }
 
     private fun acceptMedia(uri: Uri) {
@@ -856,6 +885,9 @@ class MainActivity : Activity() {
                     selectionLabel.text = "Preview playback error · ${error.errorCodeName}"
                 }
                 override fun onPlaybackStateChanged(playbackState: Int) {
+                    updatePlaybackPosition()
+                }
+                override fun onIsPlayingChanged(isPlaying: Boolean) {
                     updatePlaybackPosition()
                 }
             })
