@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.filmcraft.mobile"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.filmcraft.mobile"
