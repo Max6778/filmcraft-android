@@ -1785,6 +1785,7 @@ impl FilmcraftApp {
         let status_h = if self.ui.show_status_bar { 20.0 } else { 0.0 };
         let body = egui::Rect::from_min_max(egui::pos2(full.min.x + 1.0, header.max.y + 1.0), egui::pos2(full.max.x - 1.0, full.max.y - status_h - 2.0));
         match self.ui.mode {
+            state::Mode::Edit if body.width() < 680.0 => self.mobile_edit(ui, body),
             state::Mode::Edit => self.dock_area(ui, body),
             state::Mode::Import => panels::import_mode::show(self, ui, body),
             state::Mode::Export => panels::export_mode::show(self, ui, body),
@@ -1817,6 +1818,48 @@ impl FilmcraftApp {
             self.ui.status.clear();
         }
         self.job_status(ui, sb, &t);
+    }
+
+    /// A compact, touch-first editing surface for phones and narrow windows. It keeps the
+    /// programme monitor and timeline visible together, with large tool tabs along the bottom.
+    /// Panels still use the same editor commands and project state as the desktop workspace.
+    fn mobile_edit(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let ctx = ui.ctx().clone();
+        let id = egui::Id::new("mobile-edit-panel");
+        let panel = ctx.data(|d| d.get_temp::<PanelKind>(id)).unwrap_or(PanelKind::Timeline);
+        let nav_h = 58.0_f32.min(rect.height() * 0.22);
+        let content = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.max.y - nav_h));
+        let (preview, edit) = if panel == PanelKind::Timeline {
+            let preview_h = (content.height() * 0.48).max(0.0);
+            (egui::Rect::from_min_max(content.min, egui::pos2(content.max.x, content.min.y + preview_h)),
+                egui::Rect::from_min_max(egui::pos2(content.min.x, content.min.y + preview_h), content.max))
+        } else {
+            let preview_h = (content.height() * 0.34).max(0.0);
+            (egui::Rect::from_min_max(content.min, egui::pos2(content.max.x, content.min.y + preview_h)),
+                egui::Rect::from_min_max(egui::pos2(content.min.x, content.min.y + preview_h), content.max))
+        };
+        panels::show(self, ui, PanelKind::Program, preview);
+        panels::show(self, ui, panel, edit);
+
+        let nav = egui::Rect::from_min_max(egui::pos2(rect.min.x, content.max.y), rect.max);
+        ui.painter().rect_filled(nav, 0.0, self.tokens.header_bg);
+        let labels = [
+            ("Media", PanelKind::Project), ("Audio", PanelKind::EssentialSound),
+            ("Text", PanelKind::Text), ("Effects", PanelKind::Effects),
+            ("Timeline", PanelKind::Timeline),
+        ];
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(nav).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        child.spacing_mut().item_spacing.x = 2.0;
+        for (label, target) in labels {
+            let selected = panel == target;
+            let button = egui::Button::new(egui::RichText::new(label).size(14.0).color(if selected { self.tokens.accent } else { self.tokens.text }))
+                .min_size(egui::vec2((nav.width() / 5.0).max(48.0), nav.height() - 8.0));
+            let response = child.add(button);
+            self.auto.add(&format!("mobile.tab.{label}"), response.rect, label);
+            if response.clicked() {
+                ctx.data_mut(|d| d.insert_temp(id, target));
+            }
+        }
     }
 
     /// The running job (export / render previews), if any; plays the rendered range when a preview

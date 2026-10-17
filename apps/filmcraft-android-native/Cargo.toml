@@ -1,0 +1,23 @@
+[package]
+name = "filmcraft-android-native"
+description = "JNI bridge from the Android app to the FilmCraft Rust editing session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "filmcraft_android"
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[lints.rust]
+# JNI exports are the native ABI boundary. Keep unsafe code denied everywhere else in this crate.
+unsafe_code = "deny"
+
+[dependencies]
+filmcraft-engine = { workspace = true }
+serde_json = { workspace = true }
+jni = "0.21.1"
