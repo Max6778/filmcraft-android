@@ -106,6 +106,10 @@ class MainActivity : ComponentActivity() {
         setContentView(buildEditor())
         initializePreviewPlayer()
         renderClips()
+        videoClips.lastOrNull()?.first?.let { uri ->
+            if (contentResolver.getType(uri)?.startsWith("image/") == true) showImage(uri) else showVideo(uri, autoPlay = false)
+        }
+        overlayClips.lastOrNull()?.first?.let(::showOverlayPreview)
         initializeRustSession()
     }
 
@@ -772,7 +776,7 @@ class MainActivity : ComponentActivity() {
                         }
                         val detail = timeline?.optString("error", "timeline unavailable") ?: "timeline unavailable"
                         selectionLabel.text = if (timeline?.optBoolean("ok") == true) {
-                            if (asOverlay) "Overlay added to V2 · drag, pinch, or rotate it" else "Added to FilmCraft timeline · $name"
+                            if (asOverlay) "Overlay added to timeline · drag, pinch, or rotate it" else "Added to FilmCraft timeline · $name"
                         } else "Imported to project bin · $detail"
                     } else selectionLabel.text = response.optString("error", "FilmCraft could not import $name")
                 }.onFailure { error ->
@@ -986,11 +990,14 @@ class MainActivity : ComponentActivity() {
         val request = overlayLoadGeneration
         overlayPreview.setImageDrawable(null)
         overlayPreview.visibility = View.VISIBLE
-        overlayPreview.translationX = 0f
-        overlayPreview.translationY = 0f
-        overlayPreview.rotation = 0f
-        overlayPreview.scaleX = 1f
-        overlayPreview.scaleY = 1f
+        val transformKey = overlayTransformKey(uri)
+        val transformPrefs = getSharedPreferences("mobile_project", MODE_PRIVATE)
+        overlayPreview.translationX = transformPrefs.getFloat("$transformKey.x", 0f)
+        overlayPreview.translationY = transformPrefs.getFloat("$transformKey.y", 0f)
+        overlayPreview.rotation = transformPrefs.getFloat("$transformKey.rotation", 0f)
+        val savedScale = transformPrefs.getFloat("$transformKey.scale", 1f).coerceIn(0.2f, 4f)
+        overlayPreview.scaleX = savedScale
+        overlayPreview.scaleY = savedScale
         imagePreviewExecutor.execute {
             val bitmap = runCatching { decodePreviewBitmap(uri) }.getOrNull()
             runOnUiThread {
@@ -1013,6 +1020,8 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    private fun overlayTransformKey(uri: Uri): String = "overlay_transform_${uri.toString().hashCode()}"
 
     private fun handleOverlayTouch(view: View, event: MotionEvent): Boolean {
         when (event.actionMasked) {
@@ -1085,6 +1094,10 @@ class MainActivity : ComponentActivity() {
         val time = playheadTicks()
         val scale = view.scaleX * 100.0
         val rotation = view.rotation.toDouble()
+        val transformKey = overlayTransformKey(selectedClipUri ?: return)
+        getSharedPreferences("mobile_project", MODE_PRIVATE).edit()
+            .putFloat("$transformKey.x", view.translationX).putFloat("$transformKey.y", view.translationY)
+            .putFloat("$transformKey.scale", view.scaleX).putFloat("$transformKey.rotation", view.rotation).apply()
         selectionLabel.text = "Saving overlay transform…"
         importExecutor.execute {
             val result = runCatching {
@@ -1177,7 +1190,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun showVideo(uri: Uri) {
+    private fun showVideo(uri: Uri, autoPlay: Boolean = true) {
         imageLoadGeneration++
         selectedClipUri = uri
         activeTimelineClipId = timelineClipIds[uri]
@@ -1191,7 +1204,7 @@ class MainActivity : ComponentActivity() {
         previewPlayer?.apply {
             setMediaItem(MediaItem.fromUri(uri))
             prepare()
-            play()
+            if (autoPlay) play() else pause()
         }
     }
 
