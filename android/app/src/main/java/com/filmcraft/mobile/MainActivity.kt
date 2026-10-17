@@ -1,6 +1,6 @@
 package com.filmcraft.mobile
 
-import android.app.Activity
+import androidx.activity.ComponentActivity
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.ColorMatrix
@@ -49,7 +49,7 @@ import androidx.media3.ui.PlayerView
 
 /** Touch-first Android editing surface backed by the FilmCraft project session. */
 @OptIn(UnstableApi::class)
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
     private val background = Color.rgb(17, 18, 20)
     private val surface = Color.rgb(29, 31, 35)
     private val muted = Color.rgb(150, 153, 160)
@@ -112,7 +112,7 @@ class MainActivity : Activity() {
     private fun buildEditor(): View {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(background)
+            setBackgroundColor(this@MainActivity.background)
             setPadding(dp(12), dp(4), dp(12), dp(4))
         }
 
@@ -798,7 +798,7 @@ class MainActivity : Activity() {
         val dialogContent = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(10), dp(16), dp(8))
-            setBackgroundColor(background)
+            setBackgroundColor(this@MainActivity.background)
         }
         val search = EditText(this).apply {
             hint = "Search effects"
