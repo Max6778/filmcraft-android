@@ -6,7 +6,7 @@
 use filmcraft_engine::{Session, autosave::AutosaveConfig};
 use jni::JNIEnv;
 use jni::objects::{JObject, JString};
-use jni::sys::{jlong, jstring};
+use jni::sys::{jboolean, jlong, jstring};
 use serde_json::{Value, json};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
@@ -70,6 +70,7 @@ mod ffi {
         mut env: JNIEnv<'_>,
         _activity: JObject<'_>,
         path: JString<'_>,
+        overlay: jboolean,
     ) -> jstring {
         let result = catch_unwind(AssertUnwindSafe(|| {
             let path = decode(&mut env, &path)?;
@@ -81,7 +82,11 @@ mod ffi {
             let timeline = imported.get("items").and_then(Value::as_array)
                 .and_then(|items| items.first()).and_then(Value::as_u64)
                 .map(|item| {
-                    if state.active_sequence().is_none() {
+                    if overlay != 0 && state.active_sequence().is_none() {
+                        Err(filmcraft_engine::EngineError::Other("add a main video or photo before placing an overlay".into()))
+                    } else if overlay != 0 {
+                        state.execute("timeline.place", json!({"item": item, "track": "new", "audio": false, "time": 0}))
+                    } else if state.active_sequence().is_none() {
                         state.execute("file.newSequenceFromClip", json!({"items": [item]}))
                     } else {
                         let time = state.active_sequence().map(|sequence| sequence.duration().0).unwrap_or_default();

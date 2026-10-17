@@ -14,6 +14,7 @@ import android.provider.OpenableColumns
 import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -63,9 +64,21 @@ class MainActivity : Activity() {
     private lateinit var imagePreview: ImageView
     private lateinit var emptyPreview: TextView
     private lateinit var videoClipStrip: LinearLayout
+    private lateinit var overlayClipStrip: LinearLayout
     private lateinit var audioClipStrip: LinearLayout
+    private lateinit var previewFrame: FrameLayout
+    private lateinit var overlayPreview: ImageView
     private val videoClips = mutableListOf<Pair<Uri, String>>()
+    private val overlayClips = mutableListOf<Pair<Uri, String>>()
     private val audioClips = mutableListOf<Pair<Uri, String>>()
+    private var pickingOverlay = false
+    private var overlayLoadGeneration = 0
+    private var lastTouchX = 0f
+    private var lastTouchY = 0f
+    private var gestureStartDistance = 1f
+    private var gestureStartAngle = 0f
+    private var gestureStartRotation = 0f
+    private var gestureStartScale = 1f
     private val timelineClipIds = mutableMapOf<Uri, Long>()
     private val effectCatalog = mutableListOf<JSONObject>()
     private val engineCommandCatalog = mutableListOf<JSONObject>()
@@ -79,7 +92,9 @@ class MainActivity : Activity() {
     private val importExecutor = Executors.newSingleThreadExecutor()
 
     private val mediaPicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
-        uris.forEach(::acceptMedia)
+        val asOverlay = pickingOverlay
+        pickingOverlay = false
+        uris.forEach { uri -> acceptMedia(uri, asOverlay) }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -130,7 +145,7 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)).apply { marginStart = dp(5) })
         root.addView(top)
 
-        val preview = FrameLayout(this).apply {
+        previewFrame = FrameLayout(this).apply {
             background = rounded(Color.rgb(5, 6, 8), 12)
             clipToOutline = true
         }
@@ -140,35 +155,41 @@ class MainActivity : Activity() {
             setShutterBackgroundColor(Color.BLACK)
             visibility = View.GONE
         }
-        preview.addView(videoPreview, FrameLayout.LayoutParams(-1, -1))
+        previewFrame.addView(videoPreview, FrameLayout.LayoutParams(-1, -1))
         imagePreview = ImageView(this).apply {
             scaleType = ImageView.ScaleType.FIT_CENTER
             visibility = View.GONE
         }
-        preview.addView(imagePreview, FrameLayout.LayoutParams(-1, -1))
+        previewFrame.addView(imagePreview, FrameLayout.LayoutParams(-1, -1))
+        overlayPreview = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            visibility = View.GONE
+            setOnTouchListener(::handleOverlayTouch)
+        }
+        previewFrame.addView(overlayPreview, FrameLayout.LayoutParams(dp(150), dp(110), Gravity.CENTER))
         emptyPreview = label("＋\nAdd a video or photo\nYour preview appears here", 15f, Color.WHITE).apply {
             gravity = Gravity.CENTER
             setOnClickListener { openMediaPicker() }
             background = rounded(Color.rgb(9, 10, 12), 12)
         }
         emptyPreview.maxLines = 3
-        preview.addView(emptyPreview, FrameLayout.LayoutParams(-1, -1))
-        preview.addView(label("PREVIEW", 9f, Color.WHITE, true).apply {
+        previewFrame.addView(emptyPreview, FrameLayout.LayoutParams(-1, -1))
+        previewFrame.addView(label("PREVIEW", 9f, Color.WHITE, true).apply {
             setPadding(dp(8), dp(3), dp(8), dp(3))
             background = rounded(Color.argb(170, 30, 31, 34), 6)
         }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(24), Gravity.TOP or Gravity.START).apply {
             topMargin = dp(8); leftMargin = dp(8)
         })
-        preview.addView(label("FIT  ·  720p", 9f, Color.WHITE, true).apply {
+        previewFrame.addView(label("FIT  ·  720p", 9f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
             setPadding(dp(8), 0, dp(8), 0)
             background = rounded(Color.argb(170, 30, 31, 34), 8)
         }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(24), Gravity.BOTTOM or Gravity.END).apply {
             bottomMargin = dp(8); rightMargin = dp(8)
         })
-        preview.setOnClickListener { togglePreviewPlayback() }
+        previewFrame.setOnClickListener { togglePreviewPlayback() }
         videoPreview.setOnClickListener { togglePreviewPlayback() }
-        root.addView(preview, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.42f).apply {
+        root.addView(previewFrame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.42f).apply {
             topMargin = dp(6); bottomMargin = dp(4)
         })
 
@@ -228,9 +249,9 @@ class MainActivity : Activity() {
             background = rounded(surface, 12)
             setPadding(dp(6), dp(6), dp(6), dp(6))
         }
-        tracks.addView(mediaTrackRow("VIDEO", true))
-        tracks.addView(trackRow("OVERLAY", listOf("＋ Add overlay"), listOf(Color.rgb(53, 45, 67))))
-        tracks.addView(mediaTrackRow("AUDIO", false))
+        tracks.addView(mediaTrackRow("VIDEO", "video"))
+        tracks.addView(mediaTrackRow("OVERLAY", "overlay"))
+        tracks.addView(mediaTrackRow("AUDIO", "audio"))
         root.addView(tracks, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.30f))
 
         selectionLabel = label("Ready · add media to start", 11f, muted).apply { gravity = Gravity.CENTER_VERTICAL }
@@ -278,7 +299,7 @@ class MainActivity : Activity() {
             "Effects" -> openEffectsBrowser()
             "Audio" -> openMediaPicker()
             "Edit" -> showEditPanel()
-            "Overlay" -> openMediaPicker()
+            "Overlay" -> openOverlayPicker()
             "Text" -> Toast.makeText(this, "Text overlays are not available in this build", Toast.LENGTH_SHORT).show()
             "Filters" -> openEffectsBrowser()
             "Canvas" -> showCanvasPanel()
@@ -393,7 +414,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun mediaTrackRow(name: String, video: Boolean): View {
+    private fun mediaTrackRow(name: String, track: String): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -401,7 +422,11 @@ class MainActivity : Activity() {
         row.addView(label(name, 9f, muted, true), LinearLayout.LayoutParams(dp(58), dp(48)))
         val lane = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
         val strip = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        if (video) videoClipStrip = strip else audioClipStrip = strip
+        when (track) {
+            "video" -> videoClipStrip = strip
+            "overlay" -> overlayClipStrip = strip
+            else -> audioClipStrip = strip
+        }
         lane.addView(strip)
         row.addView(lane, LinearLayout.LayoutParams(0, dp(48), 1f))
         return row
@@ -410,6 +435,7 @@ class MainActivity : Activity() {
     private fun renderClips() {
         if (!::videoClipStrip.isInitialized || !::audioClipStrip.isInitialized) return
         videoClipStrip.removeAllViews()
+        overlayClipStrip.removeAllViews()
         audioClipStrip.removeAllViews()
         videoClips.forEachIndexed { index, clip ->
             videoClipStrip.addView(clipChip(clip.second, Color.rgb(48, 52, 58), { confirmRemove(clip.first, true) }) {
@@ -421,6 +447,16 @@ class MainActivity : Activity() {
                 selectionLabel.text = "Clip ${index + 1} · ${clip.second}"
             })
         }
+        overlayClips.forEachIndexed { index, clip ->
+            overlayClipStrip.addView(clipChip(clip.second, Color.rgb(53, 45, 67), { confirmRemoveOverlay(clip.first) }) {
+                selectedClipUri = clip.first
+                activeTimelineClipId = timelineClipIds[clip.first]
+                selectedClipHasVideo = true
+                showOverlayPreview(clip.first)
+                selectionLabel.text = "Overlay ${index + 1} · ${clip.second} · drag, pinch, or rotate"
+            })
+        }
+        if (overlayClips.isEmpty()) overlayClipStrip.addView(clipChip("＋ Add overlay", Color.rgb(53, 45, 67)) { openOverlayPicker() })
         audioClips.forEachIndexed { index, clip ->
             audioClipStrip.addView(clipChip(clip.second, Color.rgb(39, 61, 52), { confirmRemove(clip.first, false) }) {
                 selectedClipUri = clip.first
@@ -504,7 +540,17 @@ class MainActivity : Activity() {
     }
 
     private fun openMediaPicker() {
+        pickingOverlay = false
         mediaPicker.launch(arrayOf("video/*", "image/*", "audio/*"))
+    }
+
+    private fun openOverlayPicker() {
+        if (!nativeSessionReady || videoClips.isEmpty()) {
+            Toast.makeText(this, "Add a main video or photo before adding an overlay", Toast.LENGTH_LONG).show()
+            return
+        }
+        pickingOverlay = true
+        mediaPicker.launch(arrayOf("image/*"))
     }
 
     private fun confirmRemove(uri: Uri, video: Boolean) {
@@ -545,6 +591,50 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun confirmRemoveOverlay(uri: Uri) {
+        val clip = overlayClips.firstOrNull { it.first == uri } ?: return
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Remove overlay?")
+            .setMessage("Remove ${clip.second} from this draft?")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Remove") { _, _ ->
+                val clipId = timelineClipIds[uri]
+                if (clipId == null) {
+                    forgetOverlayLocally(uri)
+                    return@setPositiveButton
+                }
+                importExecutor.execute {
+                    val result = runCatching {
+                        val selected = JSONObject(nativeExecute("timeline.select", JSONObject().put("clips", JSONArray().put(clipId)).toString()))
+                        if (!selected.optBoolean("ok")) throw IllegalStateException(selected.optString("error", "Could not select overlay"))
+                        val removed = JSONObject(nativeExecute("edit.clear", JSONObject().toString()))
+                        if (!removed.optBoolean("ok")) throw IllegalStateException(removed.optString("error", "FilmCraft could not remove the overlay"))
+                    }
+                    runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
+                        result.onSuccess { forgetOverlayLocally(uri) }
+                            .onFailure { error -> selectionLabel.text = "Could not remove overlay · ${error.localizedMessage ?: "FilmCraft error"}" }
+                    }
+                }
+            }.show()
+    }
+
+    private fun forgetOverlayLocally(uri: Uri) {
+        overlayClips.removeAll { it.first == uri }
+        timelineClipIds.remove(uri)
+        overlayLoadGeneration++
+        overlayPreview.setImageDrawable(null)
+        overlayPreview.visibility = View.GONE
+        if (selectedClipUri == uri) {
+            selectedClipUri = videoClips.firstOrNull()?.first ?: audioClips.firstOrNull()?.first
+            activeTimelineClipId = selectedClipUri?.let(timelineClipIds::get)
+            selectedClipHasVideo = selectedClipUri?.let { selected -> videoClips.any { it.first == selected } } == true
+        }
+        persistClips()
+        renderClips()
+        selectionLabel.text = "Overlay removed from draft"
+    }
+
     private fun forgetMediaLocally(uri: Uri, video: Boolean) {
         val list = if (video) videoClips else audioClips
         list.removeAll { it.first == uri }
@@ -568,7 +658,7 @@ class MainActivity : Activity() {
         renderClips()
     }
 
-    private fun acceptMedia(uri: Uri) {
+    private fun acceptMedia(uri: Uri, asOverlay: Boolean = false) {
         try {
             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         } catch (_: SecurityException) {
@@ -590,6 +680,14 @@ class MainActivity : Activity() {
                 showVideo(uri)
                 selectionLabel.text = "Added video · $name"
             }
+            mimeType?.startsWith("image/") == true && asOverlay -> {
+                if (overlayClips.any { it.first == uri }) return
+                overlayClips.add(uri to name)
+                selectedClipUri = uri
+                selectedClipHasVideo = true
+                showOverlayPreview(uri)
+                selectionLabel.text = "Overlay added · $name"
+            }
             mimeType?.startsWith("image/") == true -> {
                 if (videoClips.any { it.first == uri }) return
                 videoClips.add(uri to name)
@@ -609,7 +707,7 @@ class MainActivity : Activity() {
         }
         persistClips()
         renderClips()
-        queueNativeImport(uri, name)
+        queueNativeImport(uri, name, asOverlay)
     }
 
     private fun initializeRustSession() {
@@ -647,7 +745,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun queueNativeImport(uri: Uri, name: String) {
+    private fun queueNativeImport(uri: Uri, name: String, asOverlay: Boolean = false) {
         if (!nativeSessionReady) {
             selectionLabel.text = "Added to the Android draft list · Rust core not packaged"
             return
@@ -655,7 +753,7 @@ class MainActivity : Activity() {
         importExecutor.execute {
             val result = runCatching {
                 val localPath = copyIntoAppStorage(uri, name)
-                JSONObject(nativeImportMedia(localPath))
+                JSONObject(nativeImportMedia(localPath, asOverlay))
             }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
@@ -668,13 +766,14 @@ class MainActivity : Activity() {
                             timelineClipIds[uri] = clipId
                             if (selectedClipUri == uri) {
                                 activeTimelineClipId = clipId
-                                selectedClipHasVideo = videoClips.any { it.first == uri }
+                                selectedClipHasVideo = videoClips.any { it.first == uri } || overlayClips.any { it.first == uri }
                             }
                             persistClips()
                         }
                         val detail = timeline?.optString("error", "timeline unavailable") ?: "timeline unavailable"
-                        selectionLabel.text = if (timeline?.optBoolean("ok") == true) "Added to FilmCraft timeline · $name"
-                        else "Imported to project bin · $detail"
+                        selectionLabel.text = if (timeline?.optBoolean("ok") == true) {
+                            if (asOverlay) "Overlay added to V2 · drag, pinch, or rotate it" else "Added to FilmCraft timeline · $name"
+                        } else "Imported to project bin · $detail"
                     } else selectionLabel.text = response.optString("error", "FilmCraft could not import $name")
                 }.onFailure { error ->
                     selectionLabel.text = "Could not import $name · ${error.localizedMessage ?: "read error"}"
@@ -860,6 +959,7 @@ class MainActivity : Activity() {
         activeVideo = null
         activeTimelineClipId = timelineClipIds[uri]
         selectedClipHasVideo = true
+        overlayPreview.visibility = View.GONE
         applyPreviewEffectForClip()
         imagePreview.setImageDrawable(null)
         imagePreview.visibility = View.VISIBLE
@@ -876,6 +976,134 @@ class MainActivity : Activity() {
                 }
                 if (bitmap == null) selectionLabel.text = "This photo could not be opened"
                 else imagePreview.setImageBitmap(bitmap)
+            }
+        }
+    }
+
+    private fun showOverlayPreview(uri: Uri) {
+        val image = overlayClips.firstOrNull { it.first == uri } ?: return
+        overlayLoadGeneration++
+        val request = overlayLoadGeneration
+        overlayPreview.setImageDrawable(null)
+        overlayPreview.visibility = View.VISIBLE
+        overlayPreview.translationX = 0f
+        overlayPreview.translationY = 0f
+        overlayPreview.rotation = 0f
+        overlayPreview.scaleX = 1f
+        overlayPreview.scaleY = 1f
+        imagePreviewExecutor.execute {
+            val bitmap = runCatching { decodePreviewBitmap(uri) }.getOrNull()
+            runOnUiThread {
+                if (isFinishing || isDestroyed || request != overlayLoadGeneration) {
+                    bitmap?.recycle()
+                    return@runOnUiThread
+                }
+                if (bitmap == null) {
+                    selectionLabel.text = "Overlay image could not be opened · ${image.second}"
+                    return@runOnUiThread
+                }
+                overlayPreview.setImageBitmap(bitmap)
+                val canvasWidth = previewFrame.width.coerceAtLeast(dp(150)).toFloat()
+                val canvasHeight = previewFrame.height.coerceAtLeast(dp(110)).toFloat()
+                val fit = minOf(canvasWidth * 0.72f / bitmap.width, canvasHeight * 0.72f / bitmap.height)
+                overlayPreview.layoutParams = FrameLayout.LayoutParams(
+                    (bitmap.width * fit).toInt().coerceAtLeast(dp(48)),
+                    (bitmap.height * fit).toInt().coerceAtLeast(dp(48)), Gravity.CENTER
+                )
+            }
+        }
+    }
+
+    private fun handleOverlayTouch(view: View, event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                lastTouchX = event.x
+                lastTouchY = event.y
+                return true
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                if (event.pointerCount >= 2) {
+                    gestureStartDistance = pointerDistance(event).coerceAtLeast(1f)
+                    gestureStartAngle = pointerAngle(event)
+                    gestureStartRotation = view.rotation
+                    gestureStartScale = view.scaleX
+                }
+                return true
+            }
+            MotionEvent.ACTION_POINTER_UP -> {
+                val remaining = if (event.actionIndex == 0) 1 else 0
+                if (remaining < event.pointerCount) {
+                    lastTouchX = event.getX(remaining)
+                    lastTouchY = event.getY(remaining)
+                }
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (event.pointerCount >= 2) {
+                    val distance = pointerDistance(event)
+                    val angle = pointerAngle(event)
+                    val delta = ((angle - gestureStartAngle + 540f) % 360f) - 180f
+                    val scale = (gestureStartScale * distance / gestureStartDistance).coerceIn(0.2f, 4f)
+                    view.scaleX = scale
+                    view.scaleY = scale
+                    view.rotation = gestureStartRotation + delta
+                } else {
+                    view.translationX += event.x - lastTouchX
+                    view.translationY += event.y - lastTouchY
+                    lastTouchX = event.x
+                    lastTouchY = event.y
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                commitOverlayTransform(view)
+                return true
+            }
+        }
+        return true
+    }
+
+    private fun pointerDistance(event: MotionEvent): Float {
+        val dx = event.getX(1) - event.getX(0)
+        val dy = event.getY(1) - event.getY(0)
+        return kotlin.math.sqrt(dx * dx + dy * dy)
+    }
+
+    private fun pointerAngle(event: MotionEvent): Float = Math.toDegrees(
+        kotlin.math.atan2((event.getY(1) - event.getY(0)).toDouble(), (event.getX(1) - event.getX(0)).toDouble())
+    ).toFloat()
+
+    private fun commitOverlayTransform(view: View) {
+        val clip = activeTimelineClipId ?: return
+        if (!nativeSessionReady) return
+        val width = previewFrame.width.toFloat().coerceAtLeast(1f)
+        val height = previewFrame.height.toFloat().coerceAtLeast(1f)
+        val canvasWidth = 1920.0
+        val canvasHeight = canvasWidth * height / width
+        val position = JSONArray().put(canvasWidth / 2.0 + view.translationX * canvasWidth / width)
+            .put(canvasHeight / 2.0 + view.translationY * canvasHeight / height)
+        val time = playheadTicks()
+        val scale = view.scaleX * 100.0
+        val rotation = view.rotation.toDouble()
+        selectionLabel.text = "Saving overlay transform…"
+        importExecutor.execute {
+            val result = runCatching {
+                val params = listOf(
+                    "position" to position,
+                    "scale" to scale,
+                    "rotation" to rotation,
+                )
+                params.forEach { (name, value) ->
+                    val args = JSONObject().put("clip", clip).put("effect", "motion").put("param", name)
+                        .put("value", value).put("time", time)
+                    val response = JSONObject(nativeExecute("effects.setParam", args.toString()))
+                    if (!response.optBoolean("ok")) throw IllegalStateException(response.optString("error", "Could not update $name"))
+                }
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                selectionLabel.text = result.fold({ "Overlay transform saved · keyframe it to animate" },
+                    { error -> "Transform could not be saved · ${error.localizedMessage ?: "FilmCraft error"}" })
             }
         }
     }
@@ -954,6 +1182,7 @@ class MainActivity : Activity() {
         selectedClipUri = uri
         activeTimelineClipId = timelineClipIds[uri]
         selectedClipHasVideo = true
+        overlayPreview.visibility = View.GONE
         if (activeVideo != uri) applyPreviewEffectForClip()
         activeVideo = uri
         imagePreview.visibility = View.GONE
@@ -973,7 +1202,8 @@ class MainActivity : Activity() {
                 put(JSONArray().put(uri.toString()).put(name).put(timelineClipIds[uri] ?: JSONObject.NULL))
             }
         }.toString()
-        prefs.edit().putString("video_clips", encode(videoClips)).putString("audio_clips", encode(audioClips)).apply()
+        prefs.edit().putString("video_clips", encode(videoClips)).putString("overlay_clips", encode(overlayClips))
+            .putString("audio_clips", encode(audioClips)).apply()
     }
 
     private fun restoreClips() {
@@ -995,6 +1225,7 @@ class MainActivity : Activity() {
             }
         }
         decode("video_clips", videoClips)
+        decode("overlay_clips", overlayClips)
         decode("audio_clips", audioClips)
         val lastVideo = videoClips.lastOrNull()?.first
         selectedClipUri = lastVideo
@@ -1018,7 +1249,7 @@ class MainActivity : Activity() {
     }
 
     private external fun nativeInitialize(dataDir: String): String
-    private external fun nativeImportMedia(path: String): String
+    private external fun nativeImportMedia(path: String, overlay: Boolean): String
     private external fun nativeListVideoEffects(): String
     private external fun nativeApplyEffect(clipId: Long, effectId: String): String
     private external fun nativeListCommands(): String
