@@ -54,6 +54,9 @@ class MainActivity : ComponentActivity() {
     private val surface = Color.rgb(29, 31, 35)
     private val muted = Color.rgb(150, 153, 160)
     private val accent = Color.rgb(167, 240, 74)
+    private val TICKS_PER_SECOND = 254_016_000_000L
+    private val TICKS_PER_MILLISECOND = TICKS_PER_SECOND / 1_000L
+    private val TIMELINE_PX_PER_SECOND = dp(46).toFloat()
     private lateinit var selectionLabel: TextView
     private lateinit var playbackTimeLabel: TextView
     private lateinit var playbackSeek: SeekBar
@@ -80,6 +83,14 @@ class MainActivity : ComponentActivity() {
     private var gestureStartRotation = 0f
     private var gestureStartScale = 1f
     private val timelineClipIds = mutableMapOf<Uri, Long>()
+    private val timelineStartTicks = mutableMapOf<Uri, Long>()
+    private val timelineDurationTicks = mutableMapOf<Uri, Long>()
+    private val selectedClipUris = linkedSetOf<Uri>()
+    private data class TimelineSegment(val id: Long, val itemId: Long, val uri: Uri, val name: String, val kind: String, val start: Long, val duration: Long, val sourceIn: Long)
+    private val timelineSegments = mutableListOf<TimelineSegment>()
+    private val itemUris = mutableMapOf<Long, Uri>()
+    private val selectedSegmentIds = linkedSetOf<Long>()
+    private var selectedSegmentId: Long? = null
     private val effectCatalog = mutableListOf<JSONObject>()
     private val effectCraftCatalog = mutableListOf<JSONObject>()
     private val effectCraftCommandCatalog = mutableListOf<JSONObject>()
@@ -252,6 +263,7 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { openMediaPicker() }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(30)))
         root.addView(timelineTitle)
+        root.addView(timelineActionBar(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)))
 
         val tracks = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -424,13 +436,63 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun timelineActionBar(): View {
+        val lane = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val scroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            clipToPadding = false
+            addView(lane)
+        }
+        val actions = listOf(
+            Triple(TimelineIconView.Glyph.SELECT, "Select", ::selectPrimaryTimelineClip),
+            Triple(TimelineIconView.Glyph.RAZOR, "Split", ::splitSelectedClipAtPlayhead),
+            Triple(TimelineIconView.Glyph.TRIM_IN, "Trim start", { trimSelectedClipToPlayhead(trimIn = true) }),
+            Triple(TimelineIconView.Glyph.TRIM_OUT, "Trim end", { trimSelectedClipToPlayhead(trimIn = false) }),
+            Triple(TimelineIconView.Glyph.GROUP, "Group", ::groupSelectedClips),
+            Triple(TimelineIconView.Glyph.NEST, "Nest", ::nestSelectedClips),
+            Triple(TimelineIconView.Glyph.EFFECTS, "Effects", ::openEffectsBrowser),
+            Triple(TimelineIconView.Glyph.DELETE, "Delete", ::deleteSelectedClips),
+        )
+        actions.forEach { (glyph, title, action) ->
+            val button = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                isClickable = true
+                isFocusable = true
+                addView(TimelineIconView(this@MainActivity, glyph, if (title == "Effects") accent else Color.WHITE), LinearLayout.LayoutParams(dp(20), dp(20)))
+                addView(label(title, 9f, muted, true))
+                setOnClickListener { action() }
+                contentDescription = title
+            }
+            lane.addView(button, LinearLayout.LayoutParams(dp(66), dp(50)))
+        }
+        return scroll
+    }
+
     private fun mediaTrackRow(name: String, track: String): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        row.addView(label(name, 9f, muted, true), LinearLayout.LayoutParams(dp(58), dp(48)))
-        val lane = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val icon = when (track) {
+            "video" -> TimelineIconView.Glyph.SELECT
+            "overlay" -> TimelineIconView.Glyph.NEST
+            else -> TimelineIconView.Glyph.EFFECTS
+        }
+        row.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            addView(TimelineIconView(this@MainActivity, icon, muted), LinearLayout.LayoutParams(dp(18), dp(18)))
+            addView(label(name, 8f, muted, true))
+        }, LinearLayout.LayoutParams(dp(58), dp(48)))
+        val lane = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            clipToPadding = false
+            setPadding(dp(4), 0, dp(8), 0)
+        }
         val strip = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         when (track) {
             "video" -> videoClipStrip = strip
@@ -444,53 +506,223 @@ class MainActivity : ComponentActivity() {
 
     private fun renderClips() {
         if (!::videoClipStrip.isInitialized || !::audioClipStrip.isInitialized) return
-        videoClipStrip.removeAllViews()
-        overlayClipStrip.removeAllViews()
-        audioClipStrip.removeAllViews()
-        videoClips.forEachIndexed { index, clip ->
-            videoClipStrip.addView(clipChip(clip.second, Color.rgb(48, 52, 58), { confirmRemove(clip.first, true) }) {
-                selectedClipUri = clip.first
-                activeTimelineClipId = timelineClipIds[clip.first]
-                selectedClipHasVideo = true
-                if (contentResolver.getType(clip.first)?.startsWith("image/") == true) showImage(clip.first)
-                else showVideo(clip.first)
-                selectionLabel.text = "Clip ${index + 1} · ${clip.second}"
-            })
+        videoClipStrip.removeAllViews(); overlayClipStrip.removeAllViews(); audioClipStrip.removeAllViews()
+        fun renderTrack(kind: String, strip: LinearLayout, tint: Int) {
+            val segments = timelineSegments.filter { it.kind == kind }.sortedBy { it.start }
+            var previousEnd = 0L
+            segments.forEachIndexed { index, segment ->
+                val gap = (segment.start - previousEnd).coerceAtLeast(0L)
+                val gapMargin = if (index == 0) 0 else (gap.toDouble() / TICKS_PER_SECOND * TIMELINE_PX_PER_SECOND).toInt().coerceAtMost(dp(180))
+                if (gapMargin > 0) strip.addView(View(this), LinearLayout.LayoutParams(gapMargin, 1))
+                val seconds = segment.duration.toDouble() / TICKS_PER_SECOND
+                val width = (seconds * TIMELINE_PX_PER_SECOND).toInt().coerceIn(dp(96), dp(340))
+                val chosen = segment.id in selectedSegmentIds
+                strip.addView(clipBlock(segment.name, tint, chosen, kind, width, segment.duration, {
+                    selectTimelineSegment(segment)
+                }, {
+                    if (segment.id in selectedSegmentIds) selectedSegmentIds.remove(segment.id) else selectedSegmentIds.add(segment.id)
+                    if (selectedSegmentIds.isEmpty()) {
+                        selectedSegmentId = null; selectedClipUri = null; activeTimelineClipId = null; selectedClipHasVideo = false
+                        selectionLabel.text = "No clip selected"; renderClips()
+                    } else selectTimelineSegment(segment, preserve = true)
+                }))
+                previousEnd = maxOf(previousEnd, segment.start + segment.duration)
+            }
+            if (segments.isEmpty()) {
+                val label = when (kind) { "video" -> "＋ Import video"; "overlay" -> "＋ Add overlay"; else -> "＋ Add audio" }
+                strip.addView(clipBlock(label, tint, false, kind, dp(140), null, { if (kind == "overlay") openOverlayPicker() else openMediaPicker() }, {}))
+            }
         }
-        overlayClips.forEachIndexed { index, clip ->
-            overlayClipStrip.addView(clipChip(clip.second, Color.rgb(53, 45, 67), { confirmRemoveOverlay(clip.first) }) {
-                selectedClipUri = clip.first
-                activeTimelineClipId = timelineClipIds[clip.first]
-                selectedClipHasVideo = true
-                showOverlayPreview(clip.first)
-                selectionLabel.text = "Overlay ${index + 1} · ${clip.second} · drag, pinch, or rotate"
-            })
-        }
-        if (overlayClips.isEmpty()) overlayClipStrip.addView(clipChip("＋ Add overlay", Color.rgb(53, 45, 67)) { openOverlayPicker() })
-        audioClips.forEachIndexed { index, clip ->
-            audioClipStrip.addView(clipChip(clip.second, Color.rgb(39, 61, 52), { confirmRemove(clip.first, false) }) {
-                selectedClipUri = clip.first
-                activeTimelineClipId = timelineClipIds[clip.first]
-                selectedClipHasVideo = false
-                selectionLabel.text = "Audio ${index + 1} · ${clip.second}"
-            })
-        }
-        if (videoClips.isEmpty()) videoClipStrip.addView(clipChip("＋ Import video", Color.rgb(48, 52, 58)) { openMediaPicker() })
-        if (audioClips.isEmpty()) audioClipStrip.addView(clipChip("＋ Add audio", Color.rgb(39, 61, 52)) { openMediaPicker() })
+        renderTrack("video", videoClipStrip, Color.rgb(48, 78, 96))
+        renderTrack("overlay", overlayClipStrip, Color.rgb(74, 55, 97))
+        renderTrack("audio", audioClipStrip, Color.rgb(43, 83, 64))
     }
 
-    private fun clipChip(title: String, color: Int, remove: (() -> Unit)? = null, action: () -> Unit) =
-        label(title, 12f, Color.WHITE, true).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), 0, dp(12), 0)
-            background = rounded(color, 8)
-            setOnClickListener { action() }
-            if (remove != null) setOnLongClickListener {
-                remove()
-                true
-            }
-            layoutParams = LinearLayout.LayoutParams(dp(172), dp(40)).apply { marginEnd = dp(6) }
+    private fun clipBlock(title: String, tint: Int, selected: Boolean, kind: String, width: Int, durationTicks: Long?, tap: () -> Unit, longPress: () -> Unit): View {
+        val icon = when (kind) {
+            "video" -> TimelineIconView.Glyph.SELECT
+            "overlay" -> TimelineIconView.Glyph.NEST
+            else -> TimelineIconView.Glyph.EFFECTS
         }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), dp(5), dp(8), dp(4))
+            background = rounded(if (selected) Color.rgb(49, 70, 48) else tint, 7).apply {
+                setStroke(dp(if (selected) 2 else 1), if (selected) accent else Color.argb(120, 180, 185, 190))
+            }
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { tap() }
+            setOnLongClickListener { longPress(); true }
+            val heading = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(TimelineIconView(this@MainActivity, icon, if (selected) accent else Color.WHITE), LinearLayout.LayoutParams(dp(15), dp(15)))
+                addView(label(title, 10f, Color.WHITE, true).apply {
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    setPadding(dp(5), 0, 0, 0)
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            }
+            addView(heading, LinearLayout.LayoutParams(-1, dp(20)))
+            val seconds = durationTicks?.let { String.format(java.util.Locale.US, "%.1fs", it.toDouble() / TICKS_PER_SECOND) } ?: "FilmCraft clip"
+            addView(label(seconds, 8f, Color.argb(190, 235, 239, 240)))
+            layoutParams = LinearLayout.LayoutParams(width, dp(40)).apply { marginEnd = dp(5) }
+        }
+    }
+
+    private fun selectPrimaryTimelineClip() {
+        val segment = selectedSegmentId?.let { id -> timelineSegments.firstOrNull { it.id == id } }
+            ?: timelineSegments.firstOrNull { it.uri == selectedClipUri }
+        if (segment == null) { Toast.makeText(this, "Tap a timeline clip first", Toast.LENGTH_SHORT).show(); return }
+        selectTimelineSegment(segment, preserve = true)
+    }
+
+    private fun selectTimelineSegment(segment: TimelineSegment, preserve: Boolean = false) {
+        if (!preserve) { selectedSegmentIds.clear(); selectedSegmentIds.add(segment.id) }
+        selectedSegmentId = segment.id
+        selectedClipUri = segment.uri
+        activeTimelineClipId = segment.id
+        selectedClipHasVideo = segment.kind != "audio"
+        if (segment.kind == "overlay") showOverlayPreview(segment.uri)
+        else if (segment.kind == "video") {
+            if (contentResolver.getType(segment.uri)?.startsWith("image/") == true) showImage(segment.uri)
+            else showVideo(segment.uri, startPositionMs = segment.sourceIn / TICKS_PER_MILLISECOND)
+        }
+        activeTimelineClipId = segment.id
+        val ids = selectedSegmentIds.toList()
+        if (nativeSessionReady && ids.isNotEmpty()) executeEngineCommand("timeline.select", JSONObject().put("clips", JSONArray(ids))) { }
+        selectionLabel.text = if (ids.size > 1) "${ids.size} clips selected · Split, Group, Nest or Effects" else "Selected · ${segment.name}"
+        renderClips()
+    }
+
+    private fun selectedTimelineId(): Long? = selectedSegmentId ?: activeTimelineClipId
+
+    private fun currentTimelineTicks(): Long {
+        val segment = timelineSegments.firstOrNull { it.id == selectedSegmentId } ?: return 0L
+        val mediaPosition = previewPlayer?.currentPosition?.coerceAtLeast(0L)?.times(TICKS_PER_MILLISECOND) ?: segment.sourceIn
+        return (segment.start + mediaPosition - segment.sourceIn).coerceIn(segment.start, segment.start + segment.duration)
+    }
+
+    private fun splitSelectedClipAtPlayhead() {
+        val ids = selectedSegmentIds.toList()
+        if (!nativeSessionReady || ids.isEmpty()) { Toast.makeText(this, "Select a clip first", Toast.LENGTH_SHORT).show(); return }
+        executeEngineCommand("timeline.select", JSONObject().put("clips", JSONArray(ids))) { selected ->
+            if (!selected.optBoolean("ok")) return@executeEngineCommand
+            executeEngineCommand("sequence.addEdit", JSONObject().put("time", currentTimelineTicks())) { response ->
+                selectionLabel.text = if (response.optBoolean("ok")) "Split at playhead" else response.optString("error", "Could not split clip")
+                refreshNativeTimeline()
+            }
+        }
+    }
+
+    private fun trimSelectedClipToPlayhead(trimIn: Boolean) {
+        val segment = timelineSegments.firstOrNull { it.id == selectedSegmentId }
+        val offset = (previewPlayer?.currentPosition ?: 0L).coerceAtLeast(0L) * TICKS_PER_MILLISECOND - (segment?.sourceIn ?: 0L)
+        if (!nativeSessionReady || segment == null || segment.kind == "audio" || offset <= 0L || offset >= segment.duration) {
+            Toast.makeText(this, "Select a video and move its playhead inside the clip", Toast.LENGTH_SHORT).show(); return
+        }
+        val delta = if (trimIn) offset else offset - segment.duration
+        executeEngineCommand("timeline.trim", JSONObject().put("clip", segment.id).put("edge", if (trimIn) "in" else "out").put("mode", "regular").put("delta", delta)) { response ->
+            selectionLabel.text = if (response.optBoolean("ok")) "Trimmed at playhead" else response.optString("error", "Could not trim clip")
+            refreshNativeTimeline()
+        }
+    }
+
+    private fun groupSelectedClips() {
+        runSelectedClipCommand("clip.group", JSONObject(), "Grouped selected clips")
+    }
+
+    private fun nestSelectedClips() {
+        if (selectedSegmentIds.isEmpty()) {
+            Toast.makeText(this, "Select clips first · long-press another clip to add it", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val name = EditText(this).apply {
+            hint = "Nested sequence name"
+            setText("Nested Sequence")
+            setTextColor(Color.WHITE)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            background = rounded(surface, 10)
+        }
+        android.app.AlertDialog.Builder(this).setTitle("Nest selected clips").setView(name).setNegativeButton("Cancel", null)
+            .setPositiveButton("Nest", null).create().also { dialog ->
+                dialog.setOnShowListener {
+                    dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val value = name.text.toString().trim().ifEmpty { "Nested Sequence" }
+                        dialog.dismiss()
+                        runSelectedClipCommand("clip.nest", JSONObject().put("name", value), "Created $value")
+                    }
+                }
+                dialog.show()
+            }
+    }
+
+    private fun deleteSelectedClips() {
+        if (selectedSegmentIds.isEmpty()) { Toast.makeText(this, "Tap a clip first", Toast.LENGTH_SHORT).show(); return }
+        runSelectedClipCommand("edit.clear", JSONObject(), "Removed selected clip(s)")
+    }
+
+    private fun runSelectedClipCommand(command: String, parameters: JSONObject, success: String) {
+        val ids = selectedSegmentIds.toList()
+        if (!nativeSessionReady || ids.isEmpty()) {
+            Toast.makeText(this, "Select one or more timeline clips first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        importExecutor.execute {
+            val result = runCatching {
+                val selected = JSONObject(nativeExecute("timeline.select", JSONObject().put("clips", JSONArray(ids)).toString()))
+                if (!selected.optBoolean("ok")) throw IllegalStateException(selected.optString("error", "Selection failed"))
+                JSONObject(nativeExecute(command, parameters.toString()))
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.onSuccess { response ->
+                    selectionLabel.text = if (response.optBoolean("ok")) success else response.optString("error", "$command failed")
+                    refreshNativeTimeline()
+                }.onFailure { error -> selectionLabel.text = error.localizedMessage ?: "$command failed" }
+            }
+        }
+    }
+
+    private fun refreshNativeTimeline() {
+        if (!nativeSessionReady) return
+        executeEngineCommand("sequence.inspect") { response ->
+            if (!response.optBoolean("ok")) return@executeEngineCommand
+            val result = response.optJSONObject("result") ?: return@executeEngineCommand
+            val refreshed = mutableListOf<TimelineSegment>()
+            fun readTracks(name: String, kind: String) {
+                result.optJSONArray(name)?.let { tracks ->
+                    for (trackIndex in 0 until tracks.length()) {
+                        val items = tracks.optJSONObject(trackIndex)?.optJSONArray("items") ?: continue
+                        for (itemIndex in 0 until items.length()) {
+                            val item = items.optJSONObject(itemIndex) ?: continue
+                            val clipId = item.optLong("clip", -1L)
+                            val itemId = item.optLong("item", -1L)
+                            val uri = itemUris[itemId] ?: timelineClipIds.entries.firstOrNull { it.value == clipId }?.key ?: continue
+                            itemUris[itemId] = uri
+                            val clipKind = if (kind == "audio") "audio" else if (overlayClips.any { it.first == uri }) "overlay" else "video"
+                            val nameValue = (videoClips + overlayClips + audioClips).firstOrNull { it.first == uri }?.second ?: "Clip"
+                            refreshed.add(TimelineSegment(clipId, itemId, uri, nameValue, clipKind, item.optLong("start"), item.optLong("duration"), item.optLong("sourceIn")))
+                        }
+                    }
+                }
+            }
+            readTracks("video", "video"); readTracks("audio", "audio")
+            timelineSegments.clear(); timelineSegments.addAll(refreshed)
+            timelineStartTicks.clear(); timelineDurationTicks.clear()
+            refreshed.groupBy { it.uri }.forEach { (uri, clips) ->
+                timelineStartTicks[uri] = clips.minOf { it.start }
+                timelineDurationTicks[uri] = clips.sumOf { it.duration }
+            }
+            val liveIds = refreshed.map { it.id }.toSet()
+            selectedSegmentIds.retainAll(liveIds)
+            if (selectedSegmentId != null && selectedSegmentId !in liveIds) {
+                selectedSegmentId = null; selectedClipUri = null; activeTimelineClipId = null; selectedClipHasVideo = false
+            }
+            renderClips()
+        }
+    }
 
     private fun trackRow(name: String, clips: List<String>, colors: List<Int>): View {
         val row = LinearLayout(this).apply {
@@ -735,6 +967,7 @@ class MainActivity : ComponentActivity() {
             selectionLabel.text = response.optString("error", "Could not open the FilmCraft draft")
         } else {
             selectionLabel.text = "FilmCraft project ready · import media to build the timeline"
+            refreshNativeTimeline()
             runCatching { JSONObject(nativeListCommands()) }.onSuccess { catalog ->
                 if (catalog.optBoolean("ok")) {
                     engineCommandCatalog.clear()
@@ -1062,6 +1295,7 @@ class MainActivity : ComponentActivity() {
                                 selectedClipHasVideo = videoClips.any { it.first == uri } || overlayClips.any { it.first == uri }
                             }
                             persistClips()
+                            refreshNativeTimeline()
                         }
                         val detail = timeline?.optString("error", "timeline unavailable") ?: "timeline unavailable"
                         selectionLabel.text = if (timeline?.optBoolean("ok") == true) {
@@ -1082,7 +1316,7 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "The FilmCraft effects catalog is unavailable", Toast.LENGTH_SHORT).show()
             return
         }
-        val clipId = activeTimelineClipId
+        val clipId = activeTimelineClipId ?: selectedClipUri?.let(timelineClipIds::get)
         if (!selectedClipHasVideo || clipId == null) {
             Toast.makeText(this, "Select a video or photo clip first", Toast.LENGTH_SHORT).show()
             return
@@ -1479,7 +1713,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun showVideo(uri: Uri, autoPlay: Boolean = true) {
+    private fun showVideo(uri: Uri, autoPlay: Boolean = true, startPositionMs: Long = 0L) {
         imageLoadGeneration++
         selectedClipUri = uri
         activeTimelineClipId = timelineClipIds[uri]
@@ -1493,6 +1727,7 @@ class MainActivity : ComponentActivity() {
         previewPlayer?.apply {
             setMediaItem(MediaItem.fromUri(uri))
             prepare()
+            if (startPositionMs > 0L) seekTo(startPositionMs)
             if (autoPlay) play() else pause()
         }
     }
