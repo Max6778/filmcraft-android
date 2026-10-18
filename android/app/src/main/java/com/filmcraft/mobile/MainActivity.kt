@@ -50,13 +50,13 @@ import androidx.media3.ui.PlayerView
 /** Touch-first Android editing surface backed by the FilmCraft project session. */
 @OptIn(UnstableApi::class)
 class MainActivity : ComponentActivity() {
-    private val background = Color.rgb(17, 18, 20)
-    private val surface = Color.rgb(29, 31, 35)
+    private val background = Color.rgb(18, 18, 18)
+    private val surface = Color.rgb(29, 29, 29)
     private val muted = Color.rgb(150, 153, 160)
-    private val accent = Color.rgb(167, 240, 74)
+    private val accent = Color.rgb(47, 107, 223)
     private val TICKS_PER_SECOND = 254_016_000_000L
     private val TICKS_PER_MILLISECOND = TICKS_PER_SECOND / 1_000L
-    private val TIMELINE_PX_PER_SECOND = dp(46).toFloat()
+    private val TIMELINE_DP_PER_SECOND = 46f
     private lateinit var selectionLabel: TextView
     private lateinit var playbackTimeLabel: TextView
     private lateinit var playbackSeek: SeekBar
@@ -164,6 +164,7 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { startExport() }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)).apply { marginStart = dp(5) })
         root.addView(top)
+        root.addView(editorPanelTabs(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(36)))
 
         previewFrame = FrameLayout(this).apply {
             background = rounded(Color.rgb(5, 6, 8), 12)
@@ -270,15 +271,83 @@ class MainActivity : ComponentActivity() {
             background = rounded(surface, 12)
             setPadding(dp(6), dp(6), dp(6), dp(6))
         }
-        tracks.addView(mediaTrackRow("VIDEO", "video"))
-        tracks.addView(mediaTrackRow("OVERLAY", "overlay"))
-        tracks.addView(mediaTrackRow("AUDIO", "audio"))
+        tracks.addView(mediaTrackRow("V1", "video"))
+        tracks.addView(mediaTrackRow("V2", "overlay"))
+        tracks.addView(mediaTrackRow("A1", "audio"))
         root.addView(tracks, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.30f))
 
         selectionLabel = label("Ready · add media to start", 11f, muted).apply { gravity = Gravity.CENTER_VERTICAL }
         root.addView(selectionLabel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(26)))
         root.addView(toolBar(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(62)))
         return root
+    }
+
+    /** Compact version of FilmCraft's Project / Media Browser / Effects / History panel tabs. */
+    private fun editorPanelTabs(): View {
+        val tabs = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val scroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            clipToPadding = false
+            setPadding(dp(2), 0, dp(2), 0)
+            addView(tabs)
+        }
+        listOf("Project", "Media Browser", "Effects", "History").forEach { title ->
+            val item = label(title, 11f, if (title == "Project") Color.WHITE else muted, title == "Project").apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(12), 0, dp(12), 0)
+                setOnClickListener {
+                    when (title) {
+                        "Project" -> showProjectBin()
+                        "Media Browser" -> openMediaPicker()
+                        "Effects" -> openEffectsBrowser()
+                        "History" -> showEditHistory()
+                    }
+                }
+            }
+            tabs.addView(item, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(32)).apply { marginEnd = dp(4) })
+        }
+        return scroll
+    }
+
+    private fun showProjectBin() {
+        val media = (videoClips + overlayClips + audioClips).distinctBy { it.first }
+        val rows = media.map { it.second }.toMutableList().apply { add("＋ Import media") }
+        android.app.AlertDialog.Builder(this).setTitle("Project · ${media.size} items")
+            .setItems(rows.toTypedArray()) { _, index ->
+                if (index == media.size) openMediaPicker()
+                else {
+                    val (uri, _) = media[index]
+                    val segment = timelineSegments.firstOrNull { it.uri == uri }
+                    if (segment != null) selectTimelineSegment(segment)
+                    else if (overlayClips.any { it.first == uri }) showOverlayPreview(uri)
+                    else if (contentResolver.getType(uri)?.startsWith("image/") == true) showImage(uri) else showVideo(uri)
+                }
+            }.setPositiveButton("Done", null).show()
+    }
+
+    private fun showEditHistory() {
+        if (!nativeSessionReady) {
+            Toast.makeText(this, "FilmCraft project is still starting", Toast.LENGTH_SHORT).show()
+            return
+        }
+        executeEngineCommand("history.list") { response ->
+            if (!response.optBoolean("ok")) {
+                Toast.makeText(this, response.optString("error", "History unavailable"), Toast.LENGTH_SHORT).show()
+                return@executeEngineCommand
+            }
+            val result = response.optJSONObject("result") ?: JSONObject()
+            val undo = result.optJSONArray("undo")
+            val redo = result.optJSONArray("redo")
+            val entries = mutableListOf<String>()
+            if (undo != null) for (i in undo.length() - 1 downTo 0) entries.add("↶  ${undo.optString(i)}")
+            if (redo != null) for (i in 0 until redo.length()) entries.add("↷  ${redo.optString(i)}")
+            android.app.AlertDialog.Builder(this).setTitle("History")
+                .setItems((entries.ifEmpty { listOf("No edits yet") }).toTypedArray(), null)
+                .setPositiveButton("Done", null).show()
+        }
     }
 
     private fun updatePlaybackPosition() {
@@ -477,16 +546,16 @@ class MainActivity : ComponentActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val icon = when (track) {
-            "video" -> TimelineIconView.Glyph.SELECT
-            "overlay" -> TimelineIconView.Glyph.NEST
-            else -> TimelineIconView.Glyph.EFFECTS
-        }
         row.addView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            addView(TimelineIconView(this@MainActivity, icon, muted), LinearLayout.LayoutParams(dp(18), dp(18)))
-            addView(label(name, 8f, muted, true))
+            val tagColor = if (track == "audio") Color.rgb(69, 128, 59) else accent
+            addView(label(name, 10f, Color.WHITE, true).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(6), 0, dp(6), 0)
+                background = rounded(tagColor, 4)
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(21)))
+            addView(label(when (track) { "video" -> "Video"; "overlay" -> "Overlay"; else -> "Audio" }, 8f, muted, true).apply { gravity = Gravity.CENTER })
         }, LinearLayout.LayoutParams(dp(58), dp(48)))
         val lane = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
@@ -507,15 +576,16 @@ class MainActivity : ComponentActivity() {
     private fun renderClips() {
         if (!::videoClipStrip.isInitialized || !::audioClipStrip.isInitialized) return
         videoClipStrip.removeAllViews(); overlayClipStrip.removeAllViews(); audioClipStrip.removeAllViews()
+        val timelinePxPerSecond = dp(TIMELINE_DP_PER_SECOND.toInt()).toFloat()
         fun renderTrack(kind: String, strip: LinearLayout, tint: Int) {
             val segments = timelineSegments.filter { it.kind == kind }.sortedBy { it.start }
             var previousEnd = 0L
             segments.forEachIndexed { index, segment ->
                 val gap = (segment.start - previousEnd).coerceAtLeast(0L)
-                val gapMargin = if (index == 0) 0 else (gap.toDouble() / TICKS_PER_SECOND * TIMELINE_PX_PER_SECOND).toInt().coerceAtMost(dp(180))
+                val gapMargin = if (index == 0) 0 else (gap.toDouble() / TICKS_PER_SECOND * timelinePxPerSecond).toInt().coerceAtMost(dp(180))
                 if (gapMargin > 0) strip.addView(View(this), LinearLayout.LayoutParams(gapMargin, 1))
                 val seconds = segment.duration.toDouble() / TICKS_PER_SECOND
-                val width = (seconds * TIMELINE_PX_PER_SECOND).toInt().coerceIn(dp(96), dp(340))
+                val width = (seconds * timelinePxPerSecond).toInt().coerceIn(dp(96), dp(340))
                 val chosen = segment.id in selectedSegmentIds
                 strip.addView(clipBlock(segment.name, tint, chosen, kind, width, segment.duration, {
                     selectTimelineSegment(segment)
@@ -533,9 +603,9 @@ class MainActivity : ComponentActivity() {
                 strip.addView(clipBlock(label, tint, false, kind, dp(140), null, { if (kind == "overlay") openOverlayPicker() else openMediaPicker() }, {}))
             }
         }
-        renderTrack("video", videoClipStrip, Color.rgb(48, 78, 96))
-        renderTrack("overlay", overlayClipStrip, Color.rgb(74, 55, 97))
-        renderTrack("audio", audioClipStrip, Color.rgb(43, 83, 64))
+        renderTrack("video", videoClipStrip, Color.rgb(32, 65, 92))
+        renderTrack("overlay", overlayClipStrip, Color.rgb(37, 79, 112))
+        renderTrack("audio", audioClipStrip, Color.rgb(49, 85, 46))
     }
 
     private fun clipBlock(title: String, tint: Int, selected: Boolean, kind: String, width: Int, durationTicks: Long?, tap: () -> Unit, longPress: () -> Unit): View {
@@ -547,7 +617,7 @@ class MainActivity : ComponentActivity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(8), dp(5), dp(8), dp(4))
-            background = rounded(if (selected) Color.rgb(49, 70, 48) else tint, 7).apply {
+            background = rounded(if (selected) Color.rgb(32, 72, 112) else tint, 7).apply {
                 setStroke(dp(if (selected) 2 else 1), if (selected) accent else Color.argb(120, 180, 185, 190))
             }
             isClickable = true
